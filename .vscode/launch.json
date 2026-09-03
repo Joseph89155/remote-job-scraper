@@ -1,0 +1,29 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run job scraper (new jobs only)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/remote_job_scraper.py",
+      "console": "integratedTerminal",
+      "args": []
+    },
+    {
+      "name": "Run job scraper (--all, ignore state filter)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/remote_job_scraper.py",
+      "console": "integratedTerminal",
+      "args": ["--all"]
+    },
+    {
+      "name": "Run job scraper (--no-state, old CSV-only behavior)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/remote_job_scraper.py",
+      "console": "integratedTerminal",
+      "args": ["--no-state"]
+    }
+  ]
+}

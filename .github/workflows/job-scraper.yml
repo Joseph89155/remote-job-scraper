@@ -1,0 +1,38 @@
+name: Daily Remote Job Scrape
+
+on:
+  schedule:
+    # Runs at 06:00 UTC every day. Adjust to your timezone as needed.
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}  # lets you trigger a run manually from the Actions tab
+
+permissions:
+  contents: write  # needed so the workflow can commit updated state/CSV back to the repo
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scraper
+        run: python remote_job_scraper.py --output remote_jobs_new.csv
+        # add --companies / --lever-companies here once we have a target list, e.g.:
+        # run: python remote_job_scraper.py --output remote_jobs_new.csv --companies gitlab automattic
+
+      - name: Commit updated state and results
+        run: |
+          git config user.name "job-scraper-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add job_state.json remote_jobs_new.csv
+          git diff --quiet --cached || git commit -m "Daily job scrape: $(date -u +'%Y-%m-%d')"
+          git push

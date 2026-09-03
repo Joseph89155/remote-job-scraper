@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Editor
+.vscode/*
+!.vscode/launch.json
+
+# NOTE: remote_jobs*.csv and job_state.json are intentionally NOT ignored —
+# we want those committed daily as a changelog of new job postings.
