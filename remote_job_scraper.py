@@ -43,7 +43,9 @@ Location fit (for a Nairobi-based candidate, UTC+3):
     maybe (Europe/UK, no location stated, or unrecognized) or no (only lists
     regions that exclude Kenya). Rows are sorted yes, maybe, no. This reads
     the posting's location text only; it cannot see eligibility rules that
-    appear only in the description.
+    appear only in the description. If the same role (company + title) shows
+    up from two sources and one lists it as restricted, the other copies are
+    downgraded to maybe, since sources sometimes disagree.
 
 State tracking:
     Every job URL ever shown is stored in job_state.json. The first run
@@ -52,6 +54,7 @@ State tracking:
 
 import argparse
 import csv
+import html
 import json
 import re
 import sys
@@ -118,6 +121,11 @@ class Job:
     snippet: str = ""
     fit: str = ""        # yes / maybe / no, for a Nairobi-based candidate
     fit_note: str = ""
+
+    def __post_init__(self):
+        # Some APIs return HTML entities (e.g. "&#038;"); store plain text.
+        for name in ("title", "company", "location", "snippet"):
+            setattr(self, name, html.unescape(getattr(self, name) or ""))
 
 
 def _word_match(text: str, terms: List[str]) -> bool:
@@ -199,6 +207,37 @@ def classify_location(location: str):
     if _word_match(text, RESTRICTED_TERMS):
         return "no", "restricted to regions that exclude Kenya"
     return "maybe", "unrecognized location, check the posting"
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def _role_key(job: "Job"):
+    company = _norm(job.company).split(" ")[0] if _norm(job.company) else ""
+    return (company, _norm(job.title))
+
+
+def flag_location_conflicts(jobs: List["Job"]) -> None:
+    """
+    Sources sometimes disagree about the same posting (one says "Anywhere in
+    the World", another says "USA"). If the same role (company + title) has a
+    'no' copy, downgrade its 'yes' copies to 'maybe' so a contradicted role
+    never looks like an easy yes.
+    """
+    groups = {}
+    for j in jobs:
+        key = _role_key(j)
+        if key[0] and key[1]:
+            groups.setdefault(key, []).append(j)
+    for group in groups.values():
+        restricted = [j for j in group if j.fit == "no"]
+        if not restricted:
+            continue
+        for j in group:
+            if j.fit == "yes":
+                j.fit = "maybe"
+                j.fit_note = f"conflict: {restricted[0].source} lists this role as {restricted[0].location}"
 
 
 # ---------------------------------------------------------------- sources --
@@ -477,6 +516,7 @@ def main():
     all_jobs = dedupe(all_jobs)
     for j in all_jobs:
         j.fit, j.fit_note = classify_location(j.location)
+    flag_location_conflicts(all_jobs)
     if args.hide_restricted:
         before = len(all_jobs)
         all_jobs = [j for j in all_jobs if j.fit != "no"]
@@ -512,7 +552,8 @@ def main():
     counts = {k: sum(1 for j in jobs_to_write if j.fit == k) for k in ("yes", "maybe", "no")}
     print(f"Fit for Nairobi: {counts['yes']} yes, {counts['maybe']} maybe, {counts['no']} restricted")
     for j in jobs_to_write[:20]:
-        print(f"  {j.fit.upper():5} [{j.source}] {j.title} — {j.company} ({j.location})")
+        flag = f"  <- {j.fit_note}" if j.fit_note.startswith("conflict") else ""
+        print(f"  {j.fit.upper():5} [{j.source}] {j.title} — {j.company} ({j.location}){flag}")
     if len(jobs_to_write) > 20:
         print(f"  ...and {len(jobs_to_write) - 20} more in the CSV.")
 
