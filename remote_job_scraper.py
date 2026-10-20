@@ -27,6 +27,7 @@ Run:
     python remote_job_scraper.py --all                 # everything, still updates state
     python remote_job_scraper.py --no-state            # browse only, state untouched
     python remote_job_scraper.py --scan-descriptions   # also match on description text
+    python remote_job_scraper.py --hide-restricted     # drop US/Canada/LATAM-only roles
     python remote_job_scraper.py --companies gitlab    # check a Greenhouse board directly
     python remote_job_scraper.py --output my_jobs.csv
 
@@ -36,6 +37,13 @@ Matching rules:
     if a keyword matched. Descriptions are ignored by default because almost
     every tech job description mentions "data analysis" somewhere; turn them
     on with --scan-descriptions if you want a wider net.
+
+Location fit (for a Nairobi-based candidate, UTC+3):
+    Every row gets a fit column: yes (worldwide / anywhere / Africa / EMEA),
+    maybe (Europe/UK, no location stated, or unrecognized) or no (only lists
+    regions that exclude Kenya). Rows are sorted yes, maybe, no. This reads
+    the posting's location text only; it cannot see eligibility rules that
+    appear only in the description.
 
 State tracking:
     Every job URL ever shown is stored in job_state.json. The first run
@@ -78,6 +86,7 @@ DEFAULT_KEYWORDS = [
 EXCLUDE_TITLE_TERMS = [
     "instructor", "tutor", "teacher", "professor", "faculty", "lecturer",
     "recruiter", "sales representative", "account executive", "data entry",
+    "software engineer",
 ]
 
 # Search terms sent to Remotive (kept short to keep API calls low; the
@@ -107,6 +116,8 @@ class Job:
     source: str
     posted: str = ""
     snippet: str = ""
+    fit: str = ""        # yes / maybe / no, for a Nairobi-based candidate
+    fit_note: str = ""
 
 
 def _word_match(text: str, terms: List[str]) -> bool:
@@ -131,6 +142,63 @@ class Matcher:
         if _word_match(title, self.keywords):
             return True
         return self.scan_description and _word_match(description, self.keywords)
+
+
+# ------------------------------------------------------------ location fit --
+# Home base: Nairobi, Kenya (UTC+3). Edit the lists below if that changes.
+#   yes   = location text says worldwide / anywhere / Africa / EMEA / Kenya
+#   maybe = Europe/UK (time zone fits, but residency rules may apply),
+#           no location stated, or a location we don't recognize
+#   no    = text lists only regions that exclude Kenya (USA, Canada, LATAM...)
+
+OPEN_TERMS = [
+    "worldwide", "anywhere", "global", "globally", "international",
+    "africa", "kenya", "emea", "mea", "any location", "all countries",
+]
+EUROPE_TERMS = [
+    "europe", "european", "eu", "eea", "uk", "united kingdom", "ireland",
+    "germany", "france", "spain", "portugal", "italy", "netherlands",
+    "belgium", "austria", "switzerland", "poland", "czechia", "czech republic",
+    "slovakia", "hungary", "romania", "bulgaria", "greece", "sweden", "norway",
+    "denmark", "finland", "estonia", "latvia", "lithuania", "croatia", "serbia",
+    "berlin", "munich", "hamburg", "frankfurt", "cologne", "stuttgart",
+    "london", "dublin", "amsterdam", "vienna", "zurich", "barcelona", "madrid",
+    "lisbon", "warsaw", "prague",
+]
+RESTRICTED_TERMS = [
+    "us", "usa", "united states", "canada", "north america", "northern america",
+    "americas", "latam", "latin america", "mexico", "brazil", "argentina",
+    "colombia", "chile", "peru", "apac", "asia", "australia", "new zealand",
+    "india", "philippines", "singapore", "japan",
+]
+FIT_RANK = {"yes": 0, "maybe": 1, "no": 2}
+
+# "Anywhere in the US" contains "anywhere" but is the opposite of open.
+_ANYWHERE_IN_REGION = re.compile(
+    r"anywhere in (?:the )?(us|usa|united states|canada|europe|eu|uk|united kingdom|"
+    r"north america|latam|latin america|apac|asia)\b"
+)
+
+
+def classify_location(location: str):
+    """Return (fit, note) for a Nairobi-based candidate; fit is 'yes', 'maybe' or 'no'."""
+    text = (location or "").lower().strip()
+    m = _ANYWHERE_IN_REGION.search(text)
+    if m:
+        region = m.group(1)
+        if region in ("europe", "eu", "uk", "united kingdom"):
+            return "maybe", "Europe/UK only: time zone fits, residency rules may apply"
+        return "no", f"restricted to {region.upper()}"
+    if text in ("", "remote", "remote only", "n/a"):
+        return "maybe", "no location stated"
+    for term in OPEN_TERMS:
+        if _word_match(text, [term]):
+            return "yes", f"open: {term}"
+    if _word_match(text, EUROPE_TERMS):
+        return "maybe", "Europe/UK: time zone fits, residency rules may apply"
+    if _word_match(text, RESTRICTED_TERMS):
+        return "no", "restricted to regions that exclude Kenya"
+    return "maybe", "unrecognized location, check the posting"
 
 
 # ---------------------------------------------------------------- sources --
@@ -197,7 +265,12 @@ def fetch_arbeitnow(match: Matcher) -> List[Job]:
 
 def fetch_jobicy(match: Matcher) -> List[Job]:
     jobs: List[Job] = []
-    queries = [{"industry": "data-science", "count": 100}]
+    queries = [
+        {"industry": "data-science", "count": 100},
+        # Dedicated queries for regions a Nairobi-based candidate can work from.
+        {"industry": "data-science", "geo": "anywhere", "count": 100},
+        {"industry": "data-science", "geo": "emea", "count": 100},
+    ]
     queries += [{"tag": t, "count": 50} for t in JOBICY_TAGS]
     for params in queries:
         try:
@@ -250,7 +323,7 @@ def fetch_weworkremotely(match: Matcher) -> List[Job]:
                 jobs.append(Job(
                     title=role,
                     company=company,
-                    location="Remote",
+                    location=entry.get("region", "") or "Remote",
                     url=entry.get("link", ""),
                     source="WeWorkRemotely",
                     posted=entry.get("published", ""),
@@ -372,6 +445,8 @@ def main():
                         help="Greenhouse company slugs to check directly")
     parser.add_argument("--lever-companies", nargs="*", default=[],
                         help="Lever company slugs to check directly")
+    parser.add_argument("--hide-restricted", action="store_true",
+                        help="Drop jobs whose location is limited to regions that exclude Kenya (fit = no)")
     parser.add_argument("--output", default="remote_jobs.csv", help="Output CSV filename")
     parser.add_argument("--state-file", default="job_state.json",
                         help="JSON file tracking previously seen job URLs (default: job_state.json)")
@@ -400,7 +475,13 @@ def main():
         all_jobs += found
 
     all_jobs = dedupe(all_jobs)
-    all_jobs.sort(key=lambda j: j.source)
+    for j in all_jobs:
+        j.fit, j.fit_note = classify_location(j.location)
+    if args.hide_restricted:
+        before = len(all_jobs)
+        all_jobs = [j for j in all_jobs if j.fit != "no"]
+        print(f"Hid {before - len(all_jobs)} location-restricted roles")
+    all_jobs.sort(key=lambda j: (FIT_RANK[j.fit], j.source))
 
     if args.no_state:
         jobs_to_write = all_jobs
@@ -413,7 +494,7 @@ def main():
         jobs_to_write = all_jobs if args.all else new_jobs
 
     with open(args.output, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["title", "company", "location", "url", "source", "posted", "snippet"])
+        writer = csv.DictWriter(f, fieldnames=["fit", "fit_note", "title", "company", "location", "url", "source", "posted", "snippet"])
         writer.writeheader()
         for j in jobs_to_write:
             writer.writerow(asdict(j))
@@ -428,8 +509,10 @@ def main():
         label = "NEW roles since last run"
 
     print(f"\nFound {len(jobs_to_write)} {label}. Saved to {args.output}")
+    counts = {k: sum(1 for j in jobs_to_write if j.fit == k) for k in ("yes", "maybe", "no")}
+    print(f"Fit for Nairobi: {counts['yes']} yes, {counts['maybe']} maybe, {counts['no']} restricted")
     for j in jobs_to_write[:20]:
-        print(f"  [{j.source}] {j.title} — {j.company} ({j.location})")
+        print(f"  {j.fit.upper():5} [{j.source}] {j.title} — {j.company} ({j.location})")
     if len(jobs_to_write) > 20:
         print(f"  ...and {len(jobs_to_write) - 20} more in the CSV.")
 
